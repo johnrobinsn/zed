@@ -1,0 +1,13 @@
+{
+  "name": "Default Dark",
+  "background": "#1e1e1e",
+  "foreground": "#d4d4d4",
+  "cursor": "#00ff00",
+  "cursor_inactive": "#808080",
+  "selection": "#264f78",
+  "comment": "#6a9955",
+  "keyword": "#569cd6",
+  "string": "#ce9178",
+  "number": "#b5cea8",
+  "function": "#dcdcaa"
+}

@@ -1,0 +1,39 @@
+{
+  "font": {
+    "path": "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    "size": 14
+  },
+  "theme": {
+    "background": "#1e1e1e",
+    "foreground": "#d4d4d4",
+    "cursor": "#00ff00",
+    "selection": "#264f78",
+    "search_match": "#ffff0033",
+    "search_current_match": "#ff800066",
+    "search_box_bg": "#2d2d30"
+  },
+  "editor": {
+    "tab_width": 4,
+    "use_spaces": true,
+    "line_wrap": "none"
+  },
+  "performance": {
+    "adaptive_vsync": true,
+    "force_vsync_off": false,
+    "force_vsync_on": false,
+    "vsync_hysteresis_frames": 5
+  },
+  "keybindings": {
+    "Ctrl+S": "save",
+    "Ctrl+O": "open",
+    "Ctrl+F": "search",
+    "Ctrl+Q": "quit",
+    "Ctrl+Z": "undo",
+    "Ctrl+Y": "redo",
+    "Ctrl+C": "copy",
+    "Ctrl+V": "paste",
+    "Ctrl+X": "cut",
+    "Ctrl+A": "select_all",
+    "Ctrl+Shift+P": "command_palette"
+  }
+}

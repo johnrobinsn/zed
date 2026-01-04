@@ -1,0 +1,34 @@
+# Build artifacts
+build/
+*.o
+zed
+
+# Test executables
+tests/editor_test
+tests/search_test
+tests/integration_test
+tests/file_test
+tests/integration_xvfb_test
+tests/*_test
+tests/*_cov
+
+# Coverage files
+tests/coverage/
+*.gcda
+*.gcno
+*.gcov
+
+# Temporary files
+*.swp
+*.swo
+*~
+.*.swp
+
+# IDE files
+.vscode/
+.idea/
+*.code-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
