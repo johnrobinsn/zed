@@ -4,7 +4,7 @@ CXXFLAGS_COV = $(CXXFLAGS) -fprofile-arcs -ftest-coverage
 LDFLAGS = -lX11 -lGL -lGLEW -lfreetype -lm -lpthread
 LDFLAGS_COV = $(LDFLAGS) -lgcov --coverage
 
-TESTS = editor_test search_test integration_test file_test
+TESTS = editor_test search_test integration_test file_test utf8_test
 INTEGRATION_TESTS = integration_xvfb_test
 
 all: $(TESTS)
@@ -20,6 +20,9 @@ all: $(TESTS)
 	@echo ""
 	@echo "=== Running File I/O Tests ==="
 	@./file_test
+	@echo ""
+	@echo "=== Running UTF-8 Tests ==="
+	@./utf8_test
 	@echo ""
 	@echo "✓ All test suites completed!"
 	@echo ""
@@ -44,6 +47,9 @@ integration_test: integration_test.cpp test_framework.h
 
 file_test: file_test.cpp test_framework.h
 	$(CXX) $(CXXFLAGS) file_test.cpp -o file_test $(LDFLAGS)
+
+utf8_test: utf8_test.cpp test_framework.h test_utilities.h
+	$(CXX) $(CXXFLAGS) utf8_test.cpp -o utf8_test $(LDFLAGS)
 
 integration_xvfb_test: integration_xvfb_test.cpp test_framework.h test_utilities.h
 	$(CXX) $(CXXFLAGS) integration_xvfb_test.cpp -o integration_xvfb_test $(LDFLAGS)

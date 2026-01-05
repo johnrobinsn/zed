@@ -13,6 +13,49 @@
 #include "font.h"
 #include "shaders.h"
 
+// UTF-8 helper: Find start of previous character (move backward to char boundary)
+inline size_t utf8_prev_char_boundary(const char* text, size_t pos) {
+    if (pos == 0) return 0;
+
+    // Move back at least one byte
+    pos--;
+
+    // Keep moving back while we're on a continuation byte (10xxxxxx)
+    while (pos > 0 && (text[pos] & 0xC0) == 0x80) {
+        pos--;
+    }
+
+    return pos;
+}
+
+// UTF-8 helper: Find start of next character (move forward to char boundary)
+inline size_t utf8_next_char_boundary(const char* text, size_t pos, size_t max_len) {
+    if (pos >= max_len) return max_len;
+
+    // Move forward at least one byte
+    pos++;
+
+    // Keep moving forward while we're on a continuation byte (10xxxxxx)
+    while (pos < max_len && (text[pos] & 0xC0) == 0x80) {
+        pos++;
+    }
+
+    return pos;
+}
+
+// UTF-8 helper: Get byte length of character at position
+inline size_t utf8_char_length(const char* text, size_t pos) {
+    unsigned char c = text[pos];
+
+    if ((c & 0x80) == 0) return 1;       // 0xxxxxxx - 1 byte
+    if ((c & 0xE0) == 0xC0) return 2;    // 110xxxxx - 2 bytes
+    if ((c & 0xF0) == 0xE0) return 3;    // 1110xxxx - 3 bytes
+    if ((c & 0xF8) == 0xF0) return 4;    // 11110xxx - 4 bytes
+
+    // Invalid UTF-8 start byte, treat as 1 byte
+    return 1;
+}
+
 // UTF-8 decoder - converts UTF-8 byte sequence to Unicode codepoint
 // Returns codepoint and advances pointer past the character
 inline uint32_t utf8_decode(const char** p) {

@@ -711,12 +711,22 @@ inline void editor_handle_event(Editor* editor, PlatformEvent* event, Renderer* 
                         editor->has_selection = true;
                         editor->selection_start = editor->cursor_pos;
                     }
-                    if (editor->cursor_pos > 0) editor->cursor_pos--;
+                    // UTF-8 aware: move to previous character boundary
+                    if (editor->cursor_pos > 0) {
+                        char* text = rope_to_string(&editor->rope);
+                        editor->cursor_pos = utf8_prev_char_boundary(text, editor->cursor_pos);
+                        delete[] text;
+                    }
                     editor->selection_end = editor->cursor_pos;
                 } else {
                     // Clear selection and move
                     editor->has_selection = false;
-                    if (editor->cursor_pos > 0) editor->cursor_pos--;
+                    // UTF-8 aware: move to previous character boundary
+                    if (editor->cursor_pos > 0) {
+                        char* text = rope_to_string(&editor->rope);
+                        editor->cursor_pos = utf8_prev_char_boundary(text, editor->cursor_pos);
+                        delete[] text;
+                    }
                 }
                 // Update preferred column for up/down
                 editor->cursor_preferred_col = editor_get_column(&editor->rope, editor->cursor_pos);
@@ -727,12 +737,24 @@ inline void editor_handle_event(Editor* editor, PlatformEvent* event, Renderer* 
                         editor->has_selection = true;
                         editor->selection_start = editor->cursor_pos;
                     }
-                    if (editor->cursor_pos < rope_length(&editor->rope)) editor->cursor_pos++;
+                    // UTF-8 aware: move to next character boundary
+                    if (editor->cursor_pos < rope_length(&editor->rope)) {
+                        char* text = rope_to_string(&editor->rope);
+                        size_t len = rope_length(&editor->rope);
+                        editor->cursor_pos = utf8_next_char_boundary(text, editor->cursor_pos, len);
+                        delete[] text;
+                    }
                     editor->selection_end = editor->cursor_pos;
                 } else {
                     // Clear selection and move
                     editor->has_selection = false;
-                    if (editor->cursor_pos < rope_length(&editor->rope)) editor->cursor_pos++;
+                    // UTF-8 aware: move to next character boundary
+                    if (editor->cursor_pos < rope_length(&editor->rope)) {
+                        char* text = rope_to_string(&editor->rope);
+                        size_t len = rope_length(&editor->rope);
+                        editor->cursor_pos = utf8_next_char_boundary(text, editor->cursor_pos, len);
+                        delete[] text;
+                    }
                 }
                 // Update preferred column for up/down
                 editor->cursor_preferred_col = editor_get_column(&editor->rope, editor->cursor_pos);
@@ -832,28 +854,39 @@ inline void editor_handle_event(Editor* editor, PlatformEvent* event, Renderer* 
                 editor->has_selection = false;
 
                 if (key == 0xff08 && editor->cursor_pos > 0) { // Backspace
-                    // Get character to delete for undo
-                    char deleted_char[2];
-                    rope_substr(&editor->rope, editor->cursor_pos - 1, 1, deleted_char);
-                    deleted_char[1] = '\0';
+                    // UTF-8 aware: find the start of the previous character
+                    char* text = rope_to_string(&editor->rope);
+                    size_t prev_pos = utf8_prev_char_boundary(text, editor->cursor_pos);
+                    size_t char_len = editor->cursor_pos - prev_pos;
+
+                    // Get character to delete for undo (up to 4 bytes for UTF-8)
+                    char deleted_char[5];
+                    rope_substr(&editor->rope, prev_pos, char_len, deleted_char);
+                    deleted_char[char_len] = '\0';
 
                     // Record command
-                    editor_push_command(editor, CMD_DELETE, editor->cursor_pos - 1, deleted_char, 1);
+                    editor_push_command(editor, CMD_DELETE, prev_pos, deleted_char, char_len);
 
-                    rope_delete(&editor->rope, editor->cursor_pos - 1, 1);
-                    editor->cursor_pos--;
+                    rope_delete(&editor->rope, prev_pos, char_len);
+                    editor->cursor_pos = prev_pos;
                     editor->rope_version++;  // Invalidate cache
+                    delete[] text;
                 } else if (key == 0xff7f && editor->cursor_pos < rope_length(&editor->rope)) { // Delete
-                    // Get character to delete for undo
-                    char deleted_char[2];
-                    rope_substr(&editor->rope, editor->cursor_pos, 1, deleted_char);
-                    deleted_char[1] = '\0';
+                    // UTF-8 aware: find the length of the character at cursor
+                    char* text = rope_to_string(&editor->rope);
+                    size_t char_len = utf8_char_length(text, editor->cursor_pos);
+
+                    // Get character to delete for undo (up to 4 bytes for UTF-8)
+                    char deleted_char[5];
+                    rope_substr(&editor->rope, editor->cursor_pos, char_len, deleted_char);
+                    deleted_char[char_len] = '\0';
 
                     // Record command
-                    editor_push_command(editor, CMD_DELETE, editor->cursor_pos, deleted_char, 1);
+                    editor_push_command(editor, CMD_DELETE, editor->cursor_pos, deleted_char, char_len);
 
-                    rope_delete(&editor->rope, editor->cursor_pos, 1);
+                    rope_delete(&editor->rope, editor->cursor_pos, char_len);
                     editor->rope_version++;  // Invalidate cache
+                    delete[] text;
                 }
             } else if (key == 0xff0d) { // Return/Enter
                 // Clear selection
@@ -1091,20 +1124,23 @@ inline void editor_get_cursor_pos(Editor* editor, const char* text, float start_
         *out_x = x;
         *out_y = y;
     } else {
-        // Fallback: calculate manually if cache is invalid
+        // Fallback: calculate manually if cache is invalid (UTF-8 aware)
         float x = start_x;
         float y = start_y;
         size_t pos = 0;
+        size_t len = strlen(text);
 
-        while (pos < editor->cursor_pos && text[pos]) {
+        while (pos < editor->cursor_pos && pos < len && text[pos]) {
             if (text[pos] == '\n') {
                 x = start_x;
                 y += line_height;
+                pos++;
             } else {
-                // Fallback to approximation
+                // Fallback to approximation per character
                 x += 8.4f;
+                // UTF-8 aware: skip to next character boundary
+                pos = utf8_next_char_boundary(text, pos, len);
             }
-            pos++;
         }
 
         *out_x = x;
@@ -1176,14 +1212,15 @@ inline size_t editor_mouse_to_pos(Editor* editor, const char* text, float mouse_
         // Click was beyond all lines - return end of text
         return pos;
     } else {
-        // Fallback: use approximation if cache is invalid
+        // Fallback: use approximation if cache is invalid (UTF-8 aware)
         float x = start_x;
         float y = start_y;
         size_t pos = 0;
         size_t line_start = 0;
+        size_t len = strlen(text);
 
         // First, find which line was clicked based on Y coordinate
-        while (text[pos]) {
+        while (pos < len && text[pos]) {
             float line_top = y;
             float line_bottom = y + line_height;
 
@@ -1195,8 +1232,8 @@ inline size_t editor_mouse_to_pos(Editor* editor, const char* text, float mouse_
                 size_t line_pos = line_start;
                 float line_x = start_x;
 
-                // Search within this line only
-                while (text[line_pos]) {
+                // Search within this line only (UTF-8 aware)
+                while (line_pos < len && text[line_pos]) {
                     if (text[line_pos] == '\n') {
                         // End of line - check if click is beyond line end
                         if (mouse_x >= line_x) {
@@ -1214,27 +1251,32 @@ inline size_t editor_mouse_to_pos(Editor* editor, const char* text, float mouse_
                         best_pos = line_pos;
                     }
 
-                    line_x += 8.4f;  // Fallback approximation
-                    line_pos++;
+                    line_x += 8.4f;  // Fallback approximation per character
+                    // UTF-8 aware: skip to next character boundary
+                    line_pos = utf8_next_char_boundary(text, line_pos, len);
                 }
 
                 // If we're at end of file (no newline), check if click is beyond
-                if (!text[line_pos] && mouse_x >= line_x) {
-                    return line_pos;
+                if (line_pos >= len || !text[line_pos]) {
+                    if (mouse_x >= line_x) {
+                        return line_pos;
+                    }
                 }
 
                 return best_pos;
             }
 
-            // Move to next line
+            // Move to next line (UTF-8 aware)
             if (text[pos] == '\n') {
                 y += line_height;
                 line_start = pos + 1;
                 x = start_x;
+                pos++;
             } else {
                 x += 8.4f;
+                // UTF-8 aware: skip to next character boundary
+                pos = utf8_next_char_boundary(text, pos, len);
             }
-            pos++;
         }
 
         // Click was beyond all lines - return end of text
@@ -1311,12 +1353,13 @@ inline void editor_render(Editor* editor, Renderer* renderer) {
                 sel_end_y = y;
             }
         } else {
-            // Fallback: calculate manually
+            // Fallback: calculate manually (UTF-8 aware)
             float x = text_x;
             float y = text_y;
             size_t pos = 0;
+            size_t len = strlen(text);
 
-            while (pos <= sel_end && text[pos]) {
+            while (pos <= sel_end && pos < len && text[pos]) {
                 if (pos == sel_start) {
                     sel_start_x = x;
                     sel_start_y = y;
@@ -1330,10 +1373,12 @@ inline void editor_render(Editor* editor, Renderer* renderer) {
                 if (text[pos] == '\n') {
                     x = text_x;
                     y += line_height;
+                    pos++;
                 } else {
-                    x += 8.4f;  // Fallback approximation
+                    x += 8.4f;  // Fallback approximation per character
+                    // UTF-8 aware: skip to next character boundary
+                    pos = utf8_next_char_boundary(text, pos, len);
                 }
-                pos++;
             }
         }
 
@@ -1383,25 +1428,46 @@ inline void editor_render(Editor* editor, Renderer* renderer) {
             Color highlight_color = is_current ?
                 editor->config->search_current_match_bg : editor->config->search_match_bg;
 
-            // Find line number for this match
-            size_t line_num = 0;
-            size_t pos = 0;
-            for (size_t j = 0; j < match_pos; j++) {
-                if (text[j] == '\n') {
-                    line_num++;
-                    pos = j + 1;
+            // Calculate match start position using layout cache
+            float match_x = text_x;
+            float match_y = text_y;
+
+            if (editor->layout_cache.valid && match_pos < editor->layout_cache.char_positions.size()) {
+                // Use layout cache for accurate positioning
+                size_t line_num = 0;
+                for (size_t j = 0; j < match_pos; j++) {
+                    if (text[j] == '\n') {
+                        line_num++;
+                    }
                 }
+                match_y = text_y + line_num * line_height;
+                match_x = text_x + editor->layout_cache.char_positions[match_pos];
+            } else {
+                // Fallback: approximate positioning
+                size_t line_num = 0;
+                size_t pos = 0;
+                for (size_t j = 0; j < match_pos; j++) {
+                    if (text[j] == '\n') {
+                        line_num++;
+                        pos = j + 1;
+                    }
+                }
+                match_y = text_y + line_num * line_height;
+                size_t col = match_pos - pos;
+                match_x = text_x + col * 8.4f;  // Fallback approximation
             }
 
-            // Calculate Y position
-            float match_y = text_y + line_num * line_height;
-
-            // Calculate X position - count characters from line start
-            size_t col = match_pos - pos;
-            float match_x = text_x + col * (16.0f * 0.6f);  // Approximate char width
-
-            // Calculate width for query_len characters
-            float match_width = query_len * (16.0f * 0.6f);
+            // Calculate width from match_pos to match_pos + query_len
+            float match_width = 0.0f;
+            size_t match_end = match_pos + query_len;
+            if (editor->layout_cache.valid && match_end < editor->layout_cache.char_positions.size()) {
+                // Use layout cache for accurate width
+                match_width = editor->layout_cache.char_positions[match_end] -
+                             editor->layout_cache.char_positions[match_pos];
+            } else {
+                // Fallback
+                match_width = query_len * 8.4f;
+            }
 
             // Draw highlight rectangle
             renderer_add_rect(renderer, match_x, match_y - 12.0f, match_width, line_height, highlight_color);
