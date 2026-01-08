@@ -16,6 +16,10 @@
 
 #include <vector>
 
+// Debug logging control - set to 1 to enable verbose mouse/click/layout logging
+#define EDITOR_DEBUG_MOUSE 0
+#define EDITOR_DEBUG_LAYOUT 0
+
 // Command types for undo/redo
 enum CommandType {
     CMD_INSERT,
@@ -351,8 +355,10 @@ inline void editor_calculate_layout(Editor* editor, Renderer* renderer, const ch
     editor->layout_cache.char_positions.clear();
     editor->layout_cache.char_positions.reserve(text_len + 1);
 
+#if EDITOR_DEBUG_LAYOUT
     printf("[LAYOUT] Calculating layout for %zu chars, font_size=%d, line_height=%.1f\n",
            text_len, renderer->font_sys.font_size, editor->line_height);
+#endif
 
     float x = 0.0f;
     float y = 0.0f;
@@ -406,6 +412,7 @@ inline void editor_calculate_layout(Editor* editor, Renderer* renderer, const ch
     editor->layout_cache.text_length = text_len;
     editor->layout_cache.valid = true;
 
+#if EDITOR_DEBUG_LAYOUT
     printf("[LAYOUT] Built cache with %zu positions, first 5: ", editor->layout_cache.char_positions.size());
     for (size_t i = 0; i < 5 && i < editor->layout_cache.char_positions.size(); i++) {
         printf("%.2f ", editor->layout_cache.char_positions[i]);
@@ -427,6 +434,7 @@ inline void editor_calculate_layout(Editor* editor, Renderer* renderer, const ch
         }
         printf("\n");
     }
+#endif
 }
 
 // Calculate maximum scroll position (don't scroll past end of document)
@@ -1124,7 +1132,9 @@ inline void editor_handle_event(Editor* editor, PlatformEvent* event, Renderer* 
             // Without this, the fallback path uses 8.4f approximation which
             // doesn't match actual rendered glyph widths.
             if (renderer && (!editor->layout_cache.valid || editor->layout_cache.char_positions.size() == 0)) {
+#if EDITOR_DEBUG_MOUSE
                 printf("[CLICK] Rebuilding layout cache before click processing\n");
+#endif
                 editor_calculate_layout(editor, renderer, text);
             }
 
@@ -1141,6 +1151,7 @@ inline void editor_handle_event(Editor* editor, PlatformEvent* event, Renderer* 
                 text_x = 0.0f;
                 text_y = 0.0f;
 
+#if EDITOR_DEBUG_MOUSE
                 // DEBUG: Full transformation details
                 float zoom = renderer->font_sys.font_size / (float)renderer->base_font_size;
                 printf("[CLICK] Screen=(%d, %d) -> Doc=(%.1f, %.1f) | Zoom=%.2fx Font=%d/%d Scroll=%.1f\n",
@@ -1148,6 +1159,7 @@ inline void editor_handle_event(Editor* editor, PlatformEvent* event, Renderer* 
                        mouse_doc_x, mouse_doc_y, zoom,
                        renderer->font_sys.font_size, renderer->base_font_size,
                        editor->scroll_y);
+#endif
             } else {
                 // Fallback for tests: apply margins but no zoom
                 float margin_x = 20.0f;
@@ -1163,6 +1175,7 @@ inline void editor_handle_event(Editor* editor, PlatformEvent* event, Renderer* 
                                                      mouse_doc_x, mouse_doc_y,
                                                      text_x, text_y, line_height);
 
+#if EDITOR_DEBUG_MOUSE
             // DEBUG: Click result with context
             if (clicked_pos < strlen(text)) {
                 // Find line number for this position
@@ -1188,6 +1201,7 @@ inline void editor_handle_event(Editor* editor, PlatformEvent* event, Renderer* 
             } else {
                 printf("[CLICK] Result: pos=%zu (END OF FILE)\n", clicked_pos);
             }
+#endif
             delete[] text;
 
             if (event->mouse_button.pressed && event->mouse_button.button == 1) { // Left click
@@ -1313,12 +1327,14 @@ inline void editor_handle_event(Editor* editor, PlatformEvent* event, Renderer* 
                     text_x = 0.0f;
                     text_y = 0.0f;
 
+#if EDITOR_DEBUG_MOUSE
                     // DEBUG: Full drag coordinate details
                     float zoom = renderer->font_sys.font_size / (float)renderer->base_font_size;
                     printf("[DRAG] Screen=(%d, %d) -> Doc=(%.1f, %.1f) | Zoom=%.2fx | text_x=%.1f text_y=%.1f\n",
                            event->mouse_move.x, event->mouse_move.y,
                            mouse_doc_x, mouse_doc_y, zoom,
                            text_x, text_y);
+#endif
                 } else {
                     // Fallback for tests: apply margins but no zoom
                     float margin_x = 20.0f;
@@ -1334,7 +1350,9 @@ inline void editor_handle_event(Editor* editor, PlatformEvent* event, Renderer* 
                                                        mouse_doc_x, mouse_doc_y,
                                                        text_x, text_y, line_height);
 
+#if EDITOR_DEBUG_MOUSE
                 printf("[DRAG] Result: drag_pos=%zu\n", mouse_pos);
+#endif
                 delete[] text;
 
                 // Update selection end and cursor
@@ -1441,8 +1459,10 @@ inline void editor_get_cursor_pos(Editor* editor, const char* text, float start_
 // Helper: Convert mouse position to text position
 inline size_t editor_mouse_to_pos(Editor* editor, const char* text, float mouse_x, float mouse_y,
                                    float start_x, float start_y, float line_height) {
+#if EDITOR_DEBUG_MOUSE
     printf("[MOUSE_TO_POS] mouse=(%.1f, %.1f) start=(%.1f, %.1f) line_height=%.1f cache_valid=%d\n",
            mouse_x, mouse_y, start_x, start_y, line_height, editor->layout_cache.valid);
+#endif
 
     // Use layout cache if available
     if (editor->layout_cache.valid && editor->layout_cache.char_positions.size() > 0) {
@@ -1451,7 +1471,9 @@ inline size_t editor_mouse_to_pos(Editor* editor, const char* text, float mouse_
         size_t line_start = 0;
         size_t line_num = 0;
 
+#if EDITOR_DEBUG_MOUSE
         printf("[LINE_SEARCH] Starting at y=%.1f, looking for mouse_y=%.1f\n", y, mouse_y);
+#endif
 
         // First, find which line was clicked based on Y coordinate
         while (text[pos] && pos < editor->layout_cache.char_positions.size()) {
@@ -1460,16 +1482,20 @@ inline size_t editor_mouse_to_pos(Editor* editor, const char* text, float mouse_
             float line_top = y;
             float line_bottom = y + line_height;
 
+#if EDITOR_DEBUG_MOUSE
             // DEBUG: Show line boundaries
             if (line_num % 5 == 0 || (mouse_y >= line_top && mouse_y < line_bottom)) {
                 printf("[LINE %zu] y_range=[%.1f, %.1f) pos_range=[%zu-%zu) %s\n",
                        line_num, line_top, line_bottom, line_start, pos,
                        (mouse_y >= line_top && mouse_y < line_bottom) ? "<<< MATCH" : "");
             }
+#endif
 
             // Check if mouse Y is on this line
             if (mouse_y >= line_top && mouse_y < line_bottom) {
+#if EDITOR_DEBUG_MOUSE
                 printf("[LINE_FOUND] Line %zu at pos %zu, searching for X position\n", line_num, line_start);
+#endif
 
                 // Found the line! Now find best X position within this line
                 size_t best_pos = line_start;
@@ -1482,9 +1508,11 @@ inline size_t editor_mouse_to_pos(Editor* editor, const char* text, float mouse_
                     if (text[line_pos] == '\n') {
                         // End of line - check if click is beyond line end
                         // Use the tracked actual line end, NOT the stored newline position
+#if EDITOR_DEBUG_MOUSE
                         printf("[LINE_END] pos=%zu actual_end_x=%.1f (mouse_x=%.1f) %s\n",
                                line_pos, actual_line_end_x, mouse_x,
                                mouse_x >= actual_line_end_x ? "BEYOND" : "WITHIN");
+#endif
 
                         if (mouse_x >= actual_line_end_x) {
                             // Clicked beyond line end - position at newline
@@ -1498,6 +1526,7 @@ inline size_t editor_mouse_to_pos(Editor* editor, const char* text, float mouse_
                     float dx = mouse_x - x;
                     float distance = dx * dx;
 
+#if EDITOR_DEBUG_MOUSE
                     // DEBUG: Show character positions every 5 chars or when finding best match
                     if ((line_pos - line_start) % 5 == 0 || distance < best_distance) {
                         printf("[CHAR] pos=%zu offset=%zu x=%.1f dx=%.1f dist=%.1f char='%c' %s\n",
@@ -1505,6 +1534,7 @@ inline size_t editor_mouse_to_pos(Editor* editor, const char* text, float mouse_
                                isprint(text[line_pos]) ? text[line_pos] : '?',
                                distance < best_distance ? "<<< NEW BEST" : "");
                     }
+#endif
 
                     if (distance < best_distance) {
                         best_distance = distance;
@@ -1516,13 +1546,17 @@ inline size_t editor_mouse_to_pos(Editor* editor, const char* text, float mouse_
 
                 // If we're at end of file (no newline), check if click is beyond
                 if (!text[line_pos] && mouse_x >= start_x + editor->layout_cache.char_positions[line_pos]) {
+#if EDITOR_DEBUG_MOUSE
                     printf("[EOF] pos=%zu x=%.1f (beyond)\n",
                            line_pos, start_x + editor->layout_cache.char_positions[line_pos]);
+#endif
                     return line_pos;
                 }
 
+#if EDITOR_DEBUG_MOUSE
                 printf("[BEST_MATCH] pos=%zu offset=%zu distance=%.1f\n",
                        best_pos, best_pos - line_start, best_distance);
+#endif
                 return best_pos;
             }
 
@@ -1536,7 +1570,9 @@ inline size_t editor_mouse_to_pos(Editor* editor, const char* text, float mouse_
         }
 
         // Click was beyond all lines - return end of text
+#if EDITOR_DEBUG_MOUSE
         printf("[BEYOND_ALL_LINES] Returning pos=%zu\n", pos);
+#endif
         return pos;
     } else {
         // Fallback: use approximation if cache is invalid (UTF-8 aware)
