@@ -168,6 +168,67 @@ inline void editor_init(Editor* editor, Config* config) {
     rope_from_string(&editor->rope, "");
 }
 
+// Synchronize font metrics from renderer (call after zoom changes)
+inline void editor_sync_font_metrics(Editor* editor, Renderer* renderer) {
+    float old_line_height = editor->line_height;
+    editor->line_height = renderer->font_sys.line_height;
+
+    // Invalidate layout cache when line height changes
+    if (old_line_height != editor->line_height) {
+        editor->layout_cache.valid = false;
+        printf("Editor line height: %.1f → %.1f\n", old_line_height, editor->line_height);
+    }
+}
+
+// ============================================================================
+// COORDINATE TRANSFORMATION
+// ============================================================================
+// Unified transformation between document space and screen space
+// Handles zoom scaling and scroll offset consistently
+//
+// Document space: Character positions in pixels at current font size
+//                 (e.g., char 10 at 14px font ≈ 84px, at 21px font ≈ 126px)
+// Screen space: Scaled, scrolled viewport coordinates (window pixels)
+//
+// Transform: screen = (doc - scroll) * zoom + margin * zoom
+//            Equivalently: screen = zoom * (doc - scroll + margin)
+
+// Transform document X coordinate to screen space
+inline float editor_doc_to_screen_x(Editor* editor, Renderer* renderer, float doc_x) {
+    float zoom_scale = renderer->font_sys.font_size / (float)renderer->base_font_size;
+    float margin_x = 20.0f;  // Left margin
+    return (doc_x - 0) * zoom_scale + margin_x * zoom_scale;
+}
+
+// Transform document Y coordinate to screen space
+inline float editor_doc_to_screen_y(Editor* editor, Renderer* renderer, float doc_y) {
+    float zoom_scale = renderer->font_sys.font_size / (float)renderer->base_font_size;
+    float margin_y = 40.0f;  // Top margin
+    return (doc_y - editor->scroll_y) * zoom_scale + margin_y * zoom_scale;
+}
+
+// Inverse transform: screen X coordinate to document space (current font pixels)
+// Layout cache is in "current font pixel space", so we just subtract scaled margin
+inline float editor_screen_to_doc_x(Editor* editor, Renderer* renderer, float screen_x) {
+    float zoom_scale = renderer->font_sys.font_size / (float)renderer->base_font_size;
+    float margin_x = 20.0f;
+    return screen_x - (margin_x * zoom_scale);
+}
+
+// Inverse transform: screen Y coordinate to document space (current font pixels)
+inline float editor_screen_to_doc_y(Editor* editor, Renderer* renderer, float screen_y) {
+    float zoom_scale = renderer->font_sys.font_size / (float)renderer->base_font_size;
+    float margin_y = 40.0f;
+    return (screen_y - margin_y * zoom_scale) + editor->scroll_y;
+}
+
+// Convenience: Get base text position in screen space (for rendering)
+inline void editor_get_text_origin_screen(Editor* editor, Renderer* renderer,
+                                         float* out_x, float* out_y) {
+    *out_x = editor_doc_to_screen_x(editor, renderer, 0);
+    *out_y = editor_doc_to_screen_y(editor, renderer, 0);
+}
+
 // Forward declarations
 inline bool editor_save_file(Editor* editor, const char* path = nullptr);
 inline size_t editor_mouse_to_pos(Editor* editor, const char* text, float mouse_x, float mouse_y,
@@ -290,6 +351,9 @@ inline void editor_calculate_layout(Editor* editor, Renderer* renderer, const ch
     editor->layout_cache.char_positions.clear();
     editor->layout_cache.char_positions.reserve(text_len + 1);
 
+    printf("[LAYOUT] Calculating layout for %zu chars, font_size=%d, line_height=%.1f\n",
+           text_len, renderer->font_sys.font_size, editor->line_height);
+
     float x = 0.0f;
     float y = 0.0f;
     float line_height = editor->line_height;
@@ -299,15 +363,20 @@ inline void editor_calculate_layout(Editor* editor, Renderer* renderer, const ch
     size_t byte_pos = 0;
 
     while (byte_pos < text_len && *p) {
-        // Store current position before character
-        editor->layout_cache.char_positions.push_back(x);
-
-        // Decode UTF-8 character
+        // Decode UTF-8 character first to know byte length
         const char* prev_p = p;
         uint32_t codepoint = utf8_decode(&p);
         if (codepoint == 0) break;
 
         size_t char_bytes = p - prev_p;
+
+        // CRITICAL: Store position for EACH BYTE of the character
+        // This ensures char_positions[byte_index] always works correctly
+        // For multi-byte UTF-8, all bytes of the same char get the same X position
+        for (size_t i = 0; i < char_bytes; i++) {
+            editor->layout_cache.char_positions.push_back(x);
+        }
+
         byte_pos += char_bytes;
 
         if (codepoint == '\n') {
@@ -318,12 +387,15 @@ inline void editor_calculate_layout(Editor* editor, Renderer* renderer, const ch
             // Regular character: get actual glyph metrics
             GlyphInfo* glyph = font_system_get_glyph(&renderer->font_sys, codepoint);
 
+            float advance = 0;
             if (glyph) {
                 // Use actual advance_x from FreeType, not 8.4px approximation
-                x += glyph->advance_x;
+                advance = glyph->advance_x;
+                x += advance;
             } else {
                 // Fallback for missing glyphs
-                x += 8.4f;
+                advance = 8.4f;
+                x += advance;
             }
         }
     }
@@ -333,18 +405,71 @@ inline void editor_calculate_layout(Editor* editor, Renderer* renderer, const ch
 
     editor->layout_cache.text_length = text_len;
     editor->layout_cache.valid = true;
+
+    printf("[LAYOUT] Built cache with %zu positions, first 5: ", editor->layout_cache.char_positions.size());
+    for (size_t i = 0; i < 5 && i < editor->layout_cache.char_positions.size(); i++) {
+        printf("%.2f ", editor->layout_cache.char_positions[i]);
+    }
+    printf("\n");
+
+    // Show character positions for a line in the middle (to verify lower half)
+    size_t middle_line = 20;  // Check line 20
+    size_t line = 0;
+    size_t pos = 0;
+    while (pos < text_len && text[pos] && line < middle_line) {
+        if (text[pos] == '\n') line++;
+        pos++;
+    }
+    if (line == middle_line && pos < editor->layout_cache.char_positions.size()) {
+        printf("[LAYOUT] Line %zu (pos %zu) first 10 positions: ", middle_line, pos);
+        for (size_t i = 0; i < 10 && (pos + i) < editor->layout_cache.char_positions.size() && text[pos + i] != '\n'; i++) {
+            printf("%.2f ", editor->layout_cache.char_positions[pos + i]);
+        }
+        printf("\n");
+    }
+}
+
+// Calculate maximum scroll position (don't scroll past end of document)
+inline float editor_get_max_scroll(Editor* editor) {
+    // Count total lines in document
+    size_t total_lines = 1;  // At least 1 line
+    size_t rope_len = rope_length(&editor->rope);
+    for (size_t i = 0; i < rope_len; i++) {
+        if (rope_char_at(&editor->rope, i) == '\n') {
+            total_lines++;
+        }
+    }
+
+    // Calculate total document height
+    float doc_height = total_lines * editor->line_height;
+
+    // Scroll margin to keep cursor comfortable from edges (same as in editor_ensure_cursor_visible)
+    float scroll_margin = editor->line_height * 2.0f;
+
+    // Max scroll = document height - viewport height + margin
+    // This allows the last line to have comfortable spacing
+    float max_scroll = doc_height - editor->viewport_height + scroll_margin;
+    if (max_scroll < 0.0f) max_scroll = 0.0f;
+
+    return max_scroll;
+}
+
+// Clamp scroll to valid range
+inline void editor_clamp_scroll(Editor* editor) {
+    if (editor->scroll_y < 0.0f) {
+        editor->scroll_y = 0.0f;
+    }
+
+    float max_scroll = editor_get_max_scroll(editor);
+    if (editor->scroll_y > max_scroll) {
+        editor->scroll_y = max_scroll;
+    }
 }
 
 // Scroll editor view
 inline void editor_scroll(Editor* editor, float delta_y) {
     editor->scroll_y += delta_y;
-
-    // Clamp to valid range (don't scroll past top)
-    if (editor->scroll_y < 0.0f) {
-        editor->scroll_y = 0.0f;
-    }
-
-    // TODO: Also clamp at bottom once we know total document height
+    editor_clamp_scroll(editor);
 }
 
 // Ensure cursor is visible in viewport
@@ -363,21 +488,33 @@ inline void editor_ensure_cursor_visible(Editor* editor) {
 
     float cursor_y = line * editor->line_height;
 
-    // Check if cursor is above viewport
-    if (cursor_y < editor->scroll_y) {
-        editor->scroll_y = cursor_y;
+    // The line extends from cursor_y to cursor_y + line_height
+    float line_top = cursor_y;
+    float line_bottom = cursor_y + editor->line_height;
+
+    // Scroll margin: keep cursor 2 lines away from edges for comfortable viewing
+    float scroll_margin = editor->line_height * 2.0f;
+
+    // Check if line is above viewport (top of line not visible)
+    // Keep a comfortable margin from the top edge
+    float comfortable_viewport_top = editor->scroll_y + scroll_margin;
+
+    if (line_top < comfortable_viewport_top) {
+        editor->scroll_y = line_top - scroll_margin;
+        if (editor->scroll_y < 0.0f) editor->scroll_y = 0.0f;
     }
 
-    // Check if cursor is below viewport
-    float viewport_bottom = editor->scroll_y + editor->viewport_height - editor->line_height;
-    if (cursor_y > viewport_bottom) {
-        editor->scroll_y = cursor_y - editor->viewport_height + editor->line_height * 2;
+    // Check if line is below viewport (bottom of line not visible)
+    // Keep a comfortable margin (2 lines) from the bottom edge
+    float comfortable_viewport_bottom = editor->scroll_y + editor->viewport_height - scroll_margin;
+
+    if (line_bottom > comfortable_viewport_bottom) {
+        // Scroll so the line has margin from the bottom edge
+        editor->scroll_y = line_bottom - editor->viewport_height + scroll_margin;
     }
 
-    // Clamp
-    if (editor->scroll_y < 0.0f) {
-        editor->scroll_y = 0.0f;
-    }
+    // Clamp to valid scroll range
+    editor_clamp_scroll(editor);
 }
 
 // Helper: Find start of line containing position
@@ -703,6 +840,25 @@ inline void editor_handle_event(Editor* editor, PlatformEvent* event, Renderer* 
             else if (ctrl && ((key == 'y' || key == 'Y') || (shift && (key == 'z' || key == 'Z')))) {
                 editor_redo(editor);
             }
+            // Zoom shortcuts
+            else if (ctrl && (key == '+' || key == '=' || key == 0x002b)) {
+                // Ctrl+Plus: Zoom in (accept +, =, and keypad +)
+                renderer_zoom_in(renderer);
+                editor_sync_font_metrics(editor, renderer);
+                editor_ensure_cursor_visible(editor);
+            }
+            else if (ctrl && (key == '-' || key == 0x002d)) {
+                // Ctrl+Minus: Zoom out
+                renderer_zoom_out(renderer);
+                editor_sync_font_metrics(editor, renderer);
+                editor_ensure_cursor_visible(editor);
+            }
+            else if (ctrl && (key == '0' || key == 0x0030)) {
+                // Ctrl+0: Reset zoom
+                renderer_zoom_reset(renderer);
+                editor_sync_font_metrics(editor, renderer);
+                editor_ensure_cursor_visible(editor);
+            }
             // Arrow keys (XK_Left = 0xff51, XK_Right = 0xff53, etc.)
             else if (key == 0xff51) { // Left
                 if (shift) {
@@ -773,6 +929,7 @@ inline void editor_handle_event(Editor* editor, PlatformEvent* event, Renderer* 
                     editor_move_up(editor);
                 }
                 // Preferred column is maintained by move_up
+                editor_ensure_cursor_visible(editor);
             } else if (key == 0xff54) { // Down
                 if (shift) {
                     // Start or extend selection
@@ -788,6 +945,7 @@ inline void editor_handle_event(Editor* editor, PlatformEvent* event, Renderer* 
                     editor_move_down(editor);
                 }
                 // Preferred column is maintained by move_down
+                editor_ensure_cursor_visible(editor);
             }
             // Home key
             else if (key == 0xff50) {
@@ -803,6 +961,7 @@ inline void editor_handle_event(Editor* editor, PlatformEvent* event, Renderer* 
                     editor->has_selection = false;
                     editor_move_home(editor);
                 }
+                editor_ensure_cursor_visible(editor);
             }
             // End key
             else if (key == 0xff57) {
@@ -818,6 +977,7 @@ inline void editor_handle_event(Editor* editor, PlatformEvent* event, Renderer* 
                     editor->has_selection = false;
                     editor_move_end(editor);
                 }
+                editor_ensure_cursor_visible(editor);
             }
             // Page Up key
             else if (key == 0xff55) {
@@ -833,6 +993,7 @@ inline void editor_handle_event(Editor* editor, PlatformEvent* event, Renderer* 
                     editor->has_selection = false;
                     editor_page_up(editor);
                 }
+                editor_ensure_cursor_visible(editor);
             }
             // Page Down key
             else if (key == 0xff56) {
@@ -848,6 +1009,7 @@ inline void editor_handle_event(Editor* editor, PlatformEvent* event, Renderer* 
                     editor->has_selection = false;
                     editor_page_down(editor);
                 }
+                editor_ensure_cursor_visible(editor);
             }
             else if (key == 0xff08 || key == 0xff7f) { // Backspace or Delete
                 // Clear selection
@@ -955,14 +1117,77 @@ inline void editor_handle_event(Editor* editor, PlatformEvent* event, Renderer* 
 
             // Convert rope to string to calculate positions
             char* text = rope_to_string(&editor->rope);
-            float text_x = 20.0f;
-            float text_y = 40.0f - editor->scroll_y;  // Apply scroll offset
-            float line_height = 16.0f;
 
+            // CRITICAL: Ensure layout cache is valid before processing click
+            // The cache might be invalid after zoom/text changes, and we need
+            // accurate glyph positions for correct click-to-position mapping.
+            // Without this, the fallback path uses 8.4f approximation which
+            // doesn't match actual rendered glyph widths.
+            if (renderer && (!editor->layout_cache.valid || editor->layout_cache.char_positions.size() == 0)) {
+                printf("[CLICK] Rebuilding layout cache before click processing\n");
+                editor_calculate_layout(editor, renderer, text);
+            }
+
+            float mouse_doc_x, mouse_doc_y;
+            float text_x, text_y;
+            float line_height = editor->line_height;
+
+            if (renderer) {
+                // Transform mouse coordinates from screen space to document space
+                mouse_doc_x = editor_screen_to_doc_x(editor, renderer, event->mouse_button.x);
+                mouse_doc_y = editor_screen_to_doc_y(editor, renderer, event->mouse_button.y);
+
+                // Document space origin (0, 0 in document = character position 0)
+                text_x = 0.0f;
+                text_y = 0.0f;
+
+                // DEBUG: Full transformation details
+                float zoom = renderer->font_sys.font_size / (float)renderer->base_font_size;
+                printf("[CLICK] Screen=(%d, %d) -> Doc=(%.1f, %.1f) | Zoom=%.2fx Font=%d/%d Scroll=%.1f\n",
+                       event->mouse_button.x, event->mouse_button.y,
+                       mouse_doc_x, mouse_doc_y, zoom,
+                       renderer->font_sys.font_size, renderer->base_font_size,
+                       editor->scroll_y);
+            } else {
+                // Fallback for tests: apply margins but no zoom
+                float margin_x = 20.0f;
+                float margin_y = 40.0f;
+                mouse_doc_x = event->mouse_button.x - margin_x;
+                mouse_doc_y = event->mouse_button.y - margin_y;
+                text_x = 0.0f;
+                text_y = 0.0f;
+            }
+
+            // Use document-space coordinates (mouse and text origin both in document space)
             size_t clicked_pos = editor_mouse_to_pos(editor, text,
-                                                     event->mouse_button.x,
-                                                     event->mouse_button.y,
+                                                     mouse_doc_x, mouse_doc_y,
                                                      text_x, text_y, line_height);
+
+            // DEBUG: Click result with context
+            if (clicked_pos < strlen(text)) {
+                // Find line number for this position
+                size_t line = 0;
+                for (size_t i = 0; i < clicked_pos; i++) {
+                    if (text[i] == '\n') line++;
+                }
+                // Find line start
+                size_t line_start = 0;
+                size_t current_line = 0;
+                for (size_t i = 0; i < clicked_pos; i++) {
+                    if (text[i] == '\n') {
+                        current_line++;
+                        line_start = i + 1;
+                    }
+                }
+                size_t line_offset = clicked_pos - line_start;
+
+                printf("[CLICK] Result: pos=%zu line=%zu offset=%zu char='%c' (0x%02x)\n",
+                       clicked_pos, line, line_offset,
+                       isprint(text[clicked_pos]) ? text[clicked_pos] : '?',
+                       (unsigned char)text[clicked_pos]);
+            } else {
+                printf("[CLICK] Result: pos=%zu (END OF FILE)\n", clicked_pos);
+            }
             delete[] text;
 
             if (event->mouse_button.pressed && event->mouse_button.button == 1) { // Left click
@@ -1047,16 +1272,69 @@ inline void editor_handle_event(Editor* editor, PlatformEvent* event, Renderer* 
             }
 
             if (editor->mouse_dragging) {
+                // Auto-scroll when dragging outside viewport
+                float mouse_y = event->mouse_move.y;
+                float top_margin = 40.0f;  // Should match rendering margin
+                float auto_scroll_zone = 30.0f;  // Pixels from edge to trigger auto-scroll
+                float scroll_speed = 2.0f;  // Pixels per frame
+
+                if (mouse_y < top_margin + auto_scroll_zone) {
+                    // Dragging near top edge - scroll up
+                    float distance_from_edge = (top_margin + auto_scroll_zone) - mouse_y;
+                    float scroll_amount = scroll_speed * (distance_from_edge / auto_scroll_zone);
+                    editor->scroll_y -= scroll_amount;
+                    editor_clamp_scroll(editor);
+                } else if (mouse_y > editor->viewport_height - auto_scroll_zone) {
+                    // Dragging near bottom edge - scroll down
+                    float distance_from_edge = mouse_y - (editor->viewport_height - auto_scroll_zone);
+                    float scroll_amount = scroll_speed * (distance_from_edge / auto_scroll_zone);
+                    editor->scroll_y += scroll_amount;
+                    editor_clamp_scroll(editor);
+                }
+
                 // Convert rope to string to calculate positions
                 char* text = rope_to_string(&editor->rope);
-                float text_x = 20.0f;
-                float text_y = 40.0f - editor->scroll_y;  // Apply scroll offset
-                float line_height = 16.0f;
 
+                // CRITICAL: Ensure layout cache is valid before processing drag
+                if (renderer && (!editor->layout_cache.valid || editor->layout_cache.char_positions.size() == 0)) {
+                    editor_calculate_layout(editor, renderer, text);
+                }
+
+                float mouse_doc_x, mouse_doc_y;
+                float text_x, text_y;
+                float line_height = editor->line_height;
+
+                if (renderer) {
+                    // Transform mouse coordinates from screen space to document space
+                    mouse_doc_x = editor_screen_to_doc_x(editor, renderer, event->mouse_move.x);
+                    mouse_doc_y = editor_screen_to_doc_y(editor, renderer, event->mouse_move.y);
+
+                    // Document space origin (0, 0 in document = character position 0)
+                    text_x = 0.0f;
+                    text_y = 0.0f;
+
+                    // DEBUG: Full drag coordinate details
+                    float zoom = renderer->font_sys.font_size / (float)renderer->base_font_size;
+                    printf("[DRAG] Screen=(%d, %d) -> Doc=(%.1f, %.1f) | Zoom=%.2fx | text_x=%.1f text_y=%.1f\n",
+                           event->mouse_move.x, event->mouse_move.y,
+                           mouse_doc_x, mouse_doc_y, zoom,
+                           text_x, text_y);
+                } else {
+                    // Fallback for tests: apply margins but no zoom
+                    float margin_x = 20.0f;
+                    float margin_y = 40.0f;
+                    mouse_doc_x = event->mouse_move.x - margin_x;
+                    mouse_doc_y = event->mouse_move.y - margin_y;
+                    text_x = 0.0f;
+                    text_y = 0.0f;
+                }
+
+                // Use document-space coordinates (mouse and text origin both in document space)
                 size_t mouse_pos = editor_mouse_to_pos(editor, text,
-                                                       event->mouse_move.x,
-                                                       event->mouse_move.y,
+                                                       mouse_doc_x, mouse_doc_y,
                                                        text_x, text_y, line_height);
+
+                printf("[DRAG] Result: drag_pos=%zu\n", mouse_pos);
                 delete[] text;
 
                 // Update selection end and cursor
@@ -1068,16 +1346,28 @@ inline void editor_handle_event(Editor* editor, PlatformEvent* event, Renderer* 
         }
 
         case PLATFORM_EVENT_MOUSE_WHEEL: {
-            // Scroll 3 lines per wheel click
-            float scroll_amount = event->mouse_wheel.delta * 3.0f * 16.0f;  // 3 lines * line_height
-            editor->scroll_y -= scroll_amount;
+            bool ctrl = event->mouse_wheel.ctrl_pressed;
 
-            // Clamp scroll to valid range
-            if (editor->scroll_y < 0.0f) {
-                editor->scroll_y = 0.0f;
+            if (ctrl) {
+                // Ctrl+Mousewheel: Zoom in/out
+                if (event->mouse_wheel.delta > 0) {
+                    // Scroll up = zoom in
+                    renderer_zoom_in(renderer);
+                } else if (event->mouse_wheel.delta < 0) {
+                    // Scroll down = zoom out
+                    renderer_zoom_out(renderer);
+                }
+                editor_sync_font_metrics(editor, renderer);
+                editor_ensure_cursor_visible(editor);
+            } else {
+                // Normal scroll: 3 lines per wheel click
+                float scroll_amount = event->mouse_wheel.delta * 3.0f * editor->line_height;
+                editor->scroll_y -= scroll_amount;
+
+                // Clamp scroll to valid range
+                editor_clamp_scroll(editor);
+                // Note: Don't call editor_ensure_cursor_visible() here - user is manually scrolling
             }
-
-            editor_ensure_cursor_visible(editor);
             break;
         }
 
@@ -1151,30 +1441,52 @@ inline void editor_get_cursor_pos(Editor* editor, const char* text, float start_
 // Helper: Convert mouse position to text position
 inline size_t editor_mouse_to_pos(Editor* editor, const char* text, float mouse_x, float mouse_y,
                                    float start_x, float start_y, float line_height) {
+    printf("[MOUSE_TO_POS] mouse=(%.1f, %.1f) start=(%.1f, %.1f) line_height=%.1f cache_valid=%d\n",
+           mouse_x, mouse_y, start_x, start_y, line_height, editor->layout_cache.valid);
+
     // Use layout cache if available
     if (editor->layout_cache.valid && editor->layout_cache.char_positions.size() > 0) {
         float y = start_y;
         size_t pos = 0;
         size_t line_start = 0;
+        size_t line_num = 0;
+
+        printf("[LINE_SEARCH] Starting at y=%.1f, looking for mouse_y=%.1f\n", y, mouse_y);
 
         // First, find which line was clicked based on Y coordinate
         while (text[pos] && pos < editor->layout_cache.char_positions.size()) {
+            // Y represents the top of the line in document space
+            // Check if mouse is within this line's full height
             float line_top = y;
             float line_bottom = y + line_height;
 
+            // DEBUG: Show line boundaries
+            if (line_num % 5 == 0 || (mouse_y >= line_top && mouse_y < line_bottom)) {
+                printf("[LINE %zu] y_range=[%.1f, %.1f) pos_range=[%zu-%zu) %s\n",
+                       line_num, line_top, line_bottom, line_start, pos,
+                       (mouse_y >= line_top && mouse_y < line_bottom) ? "<<< MATCH" : "");
+            }
+
             // Check if mouse Y is on this line
             if (mouse_y >= line_top && mouse_y < line_bottom) {
+                printf("[LINE_FOUND] Line %zu at pos %zu, searching for X position\n", line_num, line_start);
+
                 // Found the line! Now find best X position within this line
                 size_t best_pos = line_start;
                 float best_distance = 1e9f;
                 size_t line_pos = line_start;
+                float actual_line_end_x = start_x;  // Track the true line end position
 
                 // Search within this line only
                 while (text[line_pos] && line_pos < editor->layout_cache.char_positions.size()) {
                     if (text[line_pos] == '\n') {
                         // End of line - check if click is beyond line end
-                        float line_end_x = start_x + editor->layout_cache.char_positions[line_pos];
-                        if (mouse_x >= line_end_x) {
+                        // Use the tracked actual line end, NOT the stored newline position
+                        printf("[LINE_END] pos=%zu actual_end_x=%.1f (mouse_x=%.1f) %s\n",
+                               line_pos, actual_line_end_x, mouse_x,
+                               mouse_x >= actual_line_end_x ? "BEYOND" : "WITHIN");
+
+                        if (mouse_x >= actual_line_end_x) {
                             // Clicked beyond line end - position at newline
                             return line_pos;
                         }
@@ -1182,8 +1494,17 @@ inline size_t editor_mouse_to_pos(Editor* editor, const char* text, float mouse_
                     }
 
                     float x = start_x + editor->layout_cache.char_positions[line_pos];
+                    actual_line_end_x = x;  // Update the actual line end as we go
                     float dx = mouse_x - x;
                     float distance = dx * dx;
+
+                    // DEBUG: Show character positions every 5 chars or when finding best match
+                    if ((line_pos - line_start) % 5 == 0 || distance < best_distance) {
+                        printf("[CHAR] pos=%zu offset=%zu x=%.1f dx=%.1f dist=%.1f char='%c' %s\n",
+                               line_pos, line_pos - line_start, x, dx, distance,
+                               isprint(text[line_pos]) ? text[line_pos] : '?',
+                               distance < best_distance ? "<<< NEW BEST" : "");
+                    }
 
                     if (distance < best_distance) {
                         best_distance = distance;
@@ -1195,9 +1516,13 @@ inline size_t editor_mouse_to_pos(Editor* editor, const char* text, float mouse_
 
                 // If we're at end of file (no newline), check if click is beyond
                 if (!text[line_pos] && mouse_x >= start_x + editor->layout_cache.char_positions[line_pos]) {
+                    printf("[EOF] pos=%zu x=%.1f (beyond)\n",
+                           line_pos, start_x + editor->layout_cache.char_positions[line_pos]);
                     return line_pos;
                 }
 
+                printf("[BEST_MATCH] pos=%zu offset=%zu distance=%.1f\n",
+                       best_pos, best_pos - line_start, best_distance);
                 return best_pos;
             }
 
@@ -1205,11 +1530,13 @@ inline size_t editor_mouse_to_pos(Editor* editor, const char* text, float mouse_
             if (text[pos] == '\n') {
                 y += line_height;
                 line_start = pos + 1;
+                line_num++;
             }
             pos++;
         }
 
         // Click was beyond all lines - return end of text
+        printf("[BEYOND_ALL_LINES] Returning pos=%zu\n", pos);
         return pos;
     } else {
         // Fallback: use approximation if cache is invalid (UTF-8 aware)
@@ -1220,6 +1547,7 @@ inline size_t editor_mouse_to_pos(Editor* editor, const char* text, float mouse_
         size_t len = strlen(text);
 
         // First, find which line was clicked based on Y coordinate
+        size_t line_num = 0;
         while (pos < len && text[pos]) {
             float line_top = y;
             float line_bottom = y + line_height;
@@ -1271,6 +1599,7 @@ inline size_t editor_mouse_to_pos(Editor* editor, const char* text, float mouse_
                 y += line_height;
                 line_start = pos + 1;
                 x = start_x;
+                line_num++;
                 pos++;
             } else {
                 x += 8.4f;
@@ -1307,11 +1636,17 @@ inline void editor_render(Editor* editor, Renderer* renderer) {
             first_render = false;
         }
     }
+    // CRITICAL: Also rebuild layout cache when zoom changes (even if text doesn't change)
+    else if (!editor->layout_cache.valid && editor->cached_text) {
+        printf("[RENDER DEBUG] Rebuilding layout cache (zoom/font changed)\n");
+        editor_calculate_layout(editor, renderer, editor->cached_text);
+    }
 
     char* text = editor->cached_text;
 
-    float text_x = 20.0f;
-    float text_y = 40.0f - editor->scroll_y;  // Apply scroll offset
+    // Use unified transformation to get text origin in screen space
+    float text_x, text_y;
+    editor_get_text_origin_screen(editor, renderer, &text_x, &text_y);
 
     // Render selection if active
     if (editor->has_selection) {
@@ -1323,7 +1658,7 @@ inline void editor_render(Editor* editor, Renderer* renderer) {
         float sel_start_y = text_y;
         float sel_end_x = text_x;
         float sel_end_y = text_y;
-        float line_height = 16.0f;
+        float line_height = editor->line_height;
 
         // Use layout cache if available
         if (editor->layout_cache.valid && editor->layout_cache.char_positions.size() > 0) {
@@ -1384,28 +1719,29 @@ inline void editor_render(Editor* editor, Renderer* renderer) {
 
         // Render selection rectangles
         Color sel_color = {0.3f, 0.5f, 0.8f, 0.3f}; // Semi-transparent blue
+        float sel_y_offset = 0.0f;  // No offset needed - text_y is already top-of-line
 
         if (sel_start_y == sel_end_y) {
             // Single line selection
-            renderer_add_rect(renderer, sel_start_x, sel_start_y - 12.0f,
+            renderer_add_rect(renderer, sel_start_x, sel_start_y - sel_y_offset,
                             sel_end_x - sel_start_x, line_height, sel_color);
         } else {
             // Multiline selection
             // First line: from selection start to end of line
             float viewport_width = (float)renderer->viewport_width;
-            renderer_add_rect(renderer, sel_start_x, sel_start_y - 12.0f,
+            renderer_add_rect(renderer, sel_start_x, sel_start_y - sel_y_offset,
                             viewport_width - sel_start_x, line_height, sel_color);
 
             // Middle lines: full width
             float current_y = sel_start_y + line_height;
             while (current_y < sel_end_y - 0.1f) {
-                renderer_add_rect(renderer, text_x, current_y - 12.0f,
+                renderer_add_rect(renderer, text_x, current_y - sel_y_offset,
                                 viewport_width - text_x, line_height, sel_color);
                 current_y += line_height;
             }
 
             // Last line: from start of line to selection end
-            renderer_add_rect(renderer, text_x, sel_end_y - 12.0f,
+            renderer_add_rect(renderer, text_x, sel_end_y - sel_y_offset,
                             sel_end_x - text_x, line_height, sel_color);
         }
     }
@@ -1418,7 +1754,7 @@ inline void editor_render(Editor* editor, Renderer* renderer) {
         SearchState* search = editor->search_state;
         size_t query_len = search->query_len;
         size_t text_len = strlen(text);
-        float line_height = 16.0f;
+        float line_height = editor->line_height;
 
         for (size_t i = 0; i < search->match_count; i++) {
             size_t match_pos = search->match_positions[i];
@@ -1469,18 +1805,19 @@ inline void editor_render(Editor* editor, Renderer* renderer) {
                 match_width = query_len * 8.4f;
             }
 
-            // Draw highlight rectangle
-            renderer_add_rect(renderer, match_x, match_y - 12.0f, match_width, line_height, highlight_color);
+            // Draw highlight rectangle - no Y offset needed
+            renderer_add_rect(renderer, match_x, match_y, match_width, line_height, highlight_color);
         }
     }
 
     // Render cursor if visible
     if (editor->cursor_visible) {
         float cursor_x, cursor_y;
-        editor_get_cursor_pos(editor, text, text_x, text_y, 16.0f, &cursor_x, &cursor_y);
+        editor_get_cursor_pos(editor, text, text_x, text_y, editor->line_height, &cursor_x, &cursor_y);
 
         // Draw cursor rectangle (2px wide, line height tall)
-        renderer_add_rect(renderer, cursor_x, cursor_y - 12.0f, 2.0f, 16.0f, editor->config->cursor);
+        // No Y offset needed - cursor_y is already top-of-line
+        renderer_add_rect(renderer, cursor_x, cursor_y, 2.0f, editor->line_height, editor->config->cursor);
     }
 
     // Flush document rendering before overlays (ensures search box appears on top)

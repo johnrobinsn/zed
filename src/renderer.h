@@ -7,6 +7,7 @@
 #include <GL/gl.h>
 #include <cstdio>
 #include <cstring>
+#include <cmath>
 #include <vector>
 
 #include "config.h"
@@ -113,6 +114,11 @@ inline uint32_t utf8_decode(const char** p) {
 // Maximum glyphs per frame
 constexpr int MAX_GLYPHS = 100000;
 
+// Zoom constants
+constexpr int MIN_FONT_SIZE = 6;     // Minimum readable size
+constexpr int MAX_FONT_SIZE = 96;    // Maximum presentation size
+constexpr float ZOOM_FACTOR = 1.1f;  // 10% per step
+
 // Glyph instance data (sent to GPU)
 struct GlyphInstance {
     float x, y;              // Screen position
@@ -130,7 +136,6 @@ struct ShaderProgram {
     // Uniform locations
     GLint projection_loc;
     GLint atlas_texture_loc;
-    GLint background_color_loc;
 };
 
 // Rectangle vertex
@@ -147,6 +152,10 @@ struct Renderer {
 
     // Font system
     FontSystem font_sys;
+
+    // Zoom state
+    int base_font_size;      // Original font size (post-DPI scaling)
+    int current_zoom_level;  // Zoom steps: negative = zoom out, positive = zoom in
 
     // Shaders
     ShaderProgram text_shader;
@@ -221,7 +230,6 @@ inline bool init_shader_program(ShaderProgram* shader, const char* vs_source, co
     // Get uniform locations
     shader->projection_loc = glGetUniformLocation(shader->program, "projection");
     shader->atlas_texture_loc = glGetUniformLocation(shader->program, "atlas_texture");
-    shader->background_color_loc = glGetUniformLocation(shader->program, "background_color");
 
     return true;
 }
@@ -266,6 +274,10 @@ inline bool renderer_init(Renderer* renderer, Config* config) {
     }
 
     glyph_atlas_init(&renderer->font_sys.atlas);
+
+    // Initialize zoom state (config->font_size already has DPI scaling applied)
+    renderer->base_font_size = config->font_size;
+    renderer->current_zoom_level = 0;
 
     // Initialize shaders
     if (!init_shader_program(&renderer->text_shader, TEXT_VERTEX_SHADER, TEXT_FRAGMENT_SHADER)) {
@@ -367,6 +379,55 @@ inline void renderer_resize(Renderer* renderer, int width, int height) {
     create_ortho_matrix(renderer->projection, 0, width, height, 0);
 }
 
+// Set zoom level (updates font size and clears atlas)
+inline bool renderer_set_zoom(Renderer* renderer, int zoom_level) {
+    // Calculate new font size with percentage scaling
+    float scale = powf(ZOOM_FACTOR, (float)zoom_level);
+    int new_font_size = (int)(renderer->base_font_size * scale + 0.5f);
+
+    // Clamp to limits
+    if (new_font_size < MIN_FONT_SIZE) {
+        new_font_size = MIN_FONT_SIZE;
+        zoom_level = (int)(logf((float)MIN_FONT_SIZE / renderer->base_font_size) / logf(ZOOM_FACTOR));
+    }
+    if (new_font_size > MAX_FONT_SIZE) {
+        new_font_size = MAX_FONT_SIZE;
+        zoom_level = (int)(logf((float)MAX_FONT_SIZE / renderer->base_font_size) / logf(ZOOM_FACTOR));
+    }
+
+    // No change needed
+    if (renderer->current_zoom_level == zoom_level) {
+        return true;
+    }
+
+    // Resize font system
+    if (!font_system_resize(&renderer->font_sys, new_font_size)) {
+        return false;
+    }
+
+    // Clear glyph atlas (forces re-rasterization)
+    glyph_atlas_clear(&renderer->font_sys.atlas);
+
+    renderer->current_zoom_level = zoom_level;
+    printf("Zoom: %+d levels (%.0f%%, %dpx)\n", zoom_level, scale * 100.0f, new_font_size);
+    return true;
+}
+
+// Zoom in
+inline void renderer_zoom_in(Renderer* renderer) {
+    renderer_set_zoom(renderer, renderer->current_zoom_level + 1);
+}
+
+// Zoom out
+inline void renderer_zoom_out(Renderer* renderer) {
+    renderer_set_zoom(renderer, renderer->current_zoom_level - 1);
+}
+
+// Reset zoom to default
+inline void renderer_zoom_reset(Renderer* renderer) {
+    renderer_set_zoom(renderer, 0);
+}
+
 // Begin frame
 inline void renderer_begin_frame(Renderer* renderer) {
     glClear(GL_COLOR_BUFFER_BIT);
@@ -411,9 +472,12 @@ inline void renderer_flush_rects(Renderer* renderer) {
 }
 
 // Add text to render queue
+// Y coordinate is the TOP of the line (not baseline)
+// This matches how click detection treats Y coordinates
 inline void renderer_add_text(Renderer* renderer, const char* text, float x, float y, Color color) {
     float cursor_x = x;
-    float cursor_y = y;
+    // Convert Y from top-of-line to baseline by adding ascent
+    float cursor_y = y + renderer->font_sys.ascent;
 
     static bool first_call = true;
     int char_count = 0;
@@ -490,11 +554,6 @@ inline void renderer_flush_text(Renderer* renderer) {
     // Bind shader and uniforms
     glUseProgram(renderer->text_shader.program);
     glUniformMatrix4fv(renderer->text_shader.projection_loc, 1, GL_FALSE, renderer->projection);
-    glUniform4f(renderer->text_shader.background_color_loc,
-                renderer->config->background.r,
-                renderer->config->background.g,
-                renderer->config->background.b,
-                renderer->config->background.a);
 
     // Bind atlas texture
     glActiveTexture(GL_TEXTURE0);

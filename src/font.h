@@ -55,6 +55,8 @@ struct FontSystem {
     GlyphAtlas atlas;
     int font_size;
     float line_height;
+    float ascent;   // Distance from top of line to baseline
+    float descent;  // Distance from baseline to bottom of line
 };
 
 // Initialize FreeType library
@@ -83,10 +85,36 @@ inline bool font_system_load_font(FontSystem* font_sys, const char* font_path, i
 
     font_sys->font_size = font_size;
     font_sys->line_height = font_sys->face->size->metrics.height / 64.0f;
+    font_sys->ascent = font_sys->face->size->metrics.ascender / 64.0f;
+    font_sys->descent = -font_sys->face->size->metrics.descender / 64.0f;  // descender is negative
 
-    printf("Loaded font: %s (size: %d, line height: %.1f)\n",
-           font_path, font_size, font_sys->line_height);
+    printf("Loaded font: %s (size: %d, line height: %.1f, ascent: %.1f, descent: %.1f)\n",
+           font_path, font_size, font_sys->line_height, font_sys->ascent, font_sys->descent);
 
+    return true;
+}
+
+// Resize font to new size (for zooming)
+inline bool font_system_resize(FontSystem* font_sys, int new_font_size) {
+    if (!font_sys->face) {
+        fprintf(stderr, "No font face loaded\n");
+        return false;
+    }
+
+    // Set new pixel size
+    if (FT_Set_Pixel_Sizes(font_sys->face, 0, new_font_size)) {
+        fprintf(stderr, "Failed to set font size: %d\n", new_font_size);
+        return false;
+    }
+
+    // Update stored size and metrics
+    font_sys->font_size = new_font_size;
+    font_sys->line_height = font_sys->face->size->metrics.height / 64.0f;
+    font_sys->ascent = font_sys->face->size->metrics.ascender / 64.0f;
+    font_sys->descent = -font_sys->face->size->metrics.descender / 64.0f;
+
+    printf("Font resized to %dpx (line height: %.1f, ascent: %.1f)\n",
+           new_font_size, font_sys->line_height, font_sys->ascent);
     return true;
 }
 
@@ -117,6 +145,28 @@ inline void glyph_atlas_init(GlyphAtlas* atlas) {
     glBindTexture(GL_TEXTURE_2D, 0);
 
     printf("Glyph atlas created (%dx%d grayscale)\n", ATLAS_WIDTH, ATLAS_HEIGHT);
+}
+
+// Clear glyph atlas (for font size changes)
+inline void glyph_atlas_clear(GlyphAtlas* atlas) {
+    // Clear glyph cache
+    atlas->glyphs.clear();
+
+    // Reset packing state
+    atlas->current_x = GLYPH_PADDING;
+    atlas->current_y = GLYPH_PADDING;
+    atlas->current_row_height = 0;
+
+    // Clear buffer
+    memset(atlas->buffer, 0, ATLAS_WIDTH * ATLAS_HEIGHT);
+
+    // Upload cleared texture
+    glBindTexture(GL_TEXTURE_2D, atlas->texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, ATLAS_WIDTH, ATLAS_HEIGHT,
+                 0, GL_RED, GL_UNSIGNED_BYTE, atlas->buffer);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    printf("Glyph atlas cleared\n");
 }
 
 // Add glyph to atlas
