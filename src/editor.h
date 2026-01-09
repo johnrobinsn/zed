@@ -205,10 +205,12 @@ inline float editor_doc_to_screen_x(Editor* editor, Renderer* renderer, float do
 }
 
 // Transform document Y coordinate to screen space
+// Note: doc_y and scroll_y are in "zoomed" units (using current line_height)
+// so we only need to subtract scroll and add margin (scaled for zoom)
 inline float editor_doc_to_screen_y(Editor* editor, Renderer* renderer, float doc_y) {
     float zoom_scale = renderer->font_sys.font_size / (float)renderer->base_font_size;
     float margin_y = 40.0f;  // Top margin
-    return (doc_y - editor->scroll_y) * zoom_scale + margin_y * zoom_scale;
+    return (doc_y - editor->scroll_y) + margin_y * zoom_scale;
 }
 
 // Inverse transform: screen X coordinate to document space (current font pixels)
@@ -500,25 +502,28 @@ inline void editor_ensure_cursor_visible(Editor* editor) {
     float line_top = cursor_y;
     float line_bottom = cursor_y + editor->line_height;
 
-    // Scroll margin: keep cursor 2 lines away from edges for comfortable viewing
-    float scroll_margin = editor->line_height * 2.0f;
+    // Account for top margin in viewport calculations
+    // The top margin reduces the effective text area
+    float top_margin = 40.0f;  // Same as margin_y in coordinate transforms
+    float effective_viewport_height = editor->viewport_height - top_margin;
 
     // Check if line is above viewport (top of line not visible)
-    // Keep a comfortable margin from the top edge
-    float comfortable_viewport_top = editor->scroll_y + scroll_margin;
+    // No margin at top - only scroll when cursor reaches actual top edge
+    float viewport_top = editor->scroll_y;
 
-    if (line_top < comfortable_viewport_top) {
-        editor->scroll_y = line_top - scroll_margin;
+    if (line_top < viewport_top) {
+        // Scroll so cursor line is at the top
+        editor->scroll_y = line_top;
         if (editor->scroll_y < 0.0f) editor->scroll_y = 0.0f;
     }
 
     // Check if line is below viewport (bottom of line not visible)
-    // Keep a comfortable margin (2 lines) from the bottom edge
-    float comfortable_viewport_bottom = editor->scroll_y + editor->viewport_height - scroll_margin;
+    // No margin at bottom - just ensure the full line is visible
+    float viewport_bottom = editor->scroll_y + effective_viewport_height;
 
-    if (line_bottom > comfortable_viewport_bottom) {
-        // Scroll so the line has margin from the bottom edge
-        editor->scroll_y = line_bottom - editor->viewport_height + scroll_margin;
+    if (line_bottom > viewport_bottom) {
+        // Scroll so the cursor line is fully visible at the bottom
+        editor->scroll_y = line_bottom - effective_viewport_height;
     }
 
     // Clamp to valid scroll range
