@@ -52,6 +52,9 @@ int main(int argc, char** argv) {
     Editor editor;
     editor_init(&editor, &config);
 
+    // Sync editor font metrics from renderer
+    editor_sync_font_metrics(&editor, &renderer);
+
     // Load file if specified
     if (file_to_open) {
         if (!editor_open_file(&editor, file_to_open)) {
@@ -199,9 +202,10 @@ int main(int argc, char** argv) {
         platform_swap_buffers(&platform);
 
         frame_count++;
-        if (frame_count % 60 == 0) {
-            printf("Frame %d (%.1f FPS)\n", frame_count, current_fps);
-        }
+        // Temporarily disabled for debugging
+        // if (frame_count % 60 == 0) {
+        //     printf("Frame %d (%.1f FPS)\n", frame_count, current_fps);
+        // }
     }
 
     // Cleanup

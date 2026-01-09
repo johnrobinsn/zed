@@ -52,16 +52,14 @@ in vec4 frag_color;
 out vec4 out_color;
 
 uniform sampler2D atlas_texture;
-uniform vec4 background_color;
 
 void main() {
     // Sample atlas (grayscale alpha)
     float alpha = texture(atlas_texture, frag_uv).r;
 
-    // Blend foreground with background using alpha
-    vec3 color = mix(background_color.rgb, frag_color.rgb, alpha);
-
-    out_color = vec4(color, 1.0);
+    // Output text color with alpha for proper blending
+    // OpenGL's blending will handle compositing with what's already drawn
+    out_color = vec4(frag_color.rgb, alpha);
 }
 )";
 

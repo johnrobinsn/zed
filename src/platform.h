@@ -58,6 +58,7 @@ struct PlatformEvent {
         struct {
             int delta;  // Positive = scroll up, negative = scroll down
             int x, y;   // Mouse position
+            bool ctrl_pressed;  // Whether Ctrl key was held during scroll
         } mouse_wheel;
 
         struct {
@@ -339,6 +340,7 @@ inline bool platform_poll_event(Platform* platform, PlatformEvent* event) {
                     event->mouse_wheel.delta = (xevent.xbutton.button == 4) ? 1 : -1;
                     event->mouse_wheel.x = xevent.xbutton.x;
                     event->mouse_wheel.y = xevent.xbutton.y;
+                    event->mouse_wheel.ctrl_pressed = (xevent.xbutton.state & ControlMask) != 0;
                 }
             } else {
                 // Regular mouse buttons
