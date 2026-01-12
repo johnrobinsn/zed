@@ -1,6 +1,6 @@
 # Zed - High-Performance Text Editor
 
-A C++ text editor built from scratch with OpenGL rendering, targeting 144+ fps with GB-sized files.
+A C++ text editor built from scratch with OpenGL rendering, targeting 60+ fps with GB-sized files.
 
 ## ✅ What's Been Implemented
 
@@ -75,7 +75,7 @@ zed/
 
 - **Compilation**: ~1 second unity build
 - **Binary Size**: 311KB
-- **Target**: 144+ fps with GB files
+- **Target**: 60+ fps with GB files
 - **Rope Operations**: O(log n) insert/delete/lookup
 
 ## 📊 Test Coverage
